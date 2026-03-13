@@ -1,10 +1,13 @@
 import express from "express";
 import cors from "cors";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
-import { execSync, spawnSync } from "child_process";
-import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, statSync, cpSync, existsSync } from "fs";
+import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { execSync } from "child_process";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, statSync, cpSync, existsSync, createWriteStream } from "fs";
 import { join, extname } from "path";
 import { randomUUID } from "crypto";
+import { pipeline } from "stream/promises";
+import { createUnzip } from "zlib";
+import { Extract } from "unzipper";
 
 const app = express();
 app.use(cors());
@@ -23,81 +26,52 @@ const r2 = new S3Client({
 const R2_BUCKET = process.env.R2_BUCKET_NAME;
 const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
 
-// ─── Pre-install base dependencies on startup ─────────────────────────────────
+// ─── Base node_modules setup ──────────────────────────────────────────────────
 const BASE_MODULES_DIR = "/tmp/base-node-modules";
+let baseModulesReady = false;
 
-function setupBaseModules() {
-  if (existsSync(BASE_MODULES_DIR + "/node_modules")) {
-    console.log("[Setup] Base node_modules already exists, skipping install.");
+async function setupBaseModules() {
+  if (existsSync(join(BASE_MODULES_DIR, "node_modules"))) {
+    console.log("[Setup] Base node_modules already ready.");
+    baseModulesReady = true;
     return;
   }
 
-  console.log("[Setup] Installing base dependencies...");
+  console.log("[Setup] Downloading node_modules.zip from B2...");
   mkdirSync(BASE_MODULES_DIR, { recursive: true });
 
-  const basePkg = {
-    name: "base-template",
-    version: "1.0.0",
-    type: "module",
-    dependencies: {
-      "react": "^18.3.1",
-      "react-dom": "^18.3.1",
-      "react-router-dom": "^6.26.2",
-      "@vitejs/plugin-react-swc": "^3.5.0",
-      "vite": "^5.4.19",
-      "typescript": "^5.5.3",
-      "tailwindcss": "^3.4.11",
-      "autoprefixer": "^10.4.20",
-      "postcss": "^8.4.47",
-      "tailwind-merge": "^2.5.2",
-      "tailwindcss-animate": "^1.0.7",
-      "class-variance-authority": "^0.7.0",
-      "clsx": "^2.1.1",
-      "lucide-react": "^0.462.0",
-      "@radix-ui/react-accordion": "^1.2.1",
-      "@radix-ui/react-alert-dialog": "^1.1.2",
-      "@radix-ui/react-avatar": "^1.1.1",
-      "@radix-ui/react-checkbox": "^1.1.2",
-      "@radix-ui/react-dialog": "^1.1.2",
-      "@radix-ui/react-dropdown-menu": "^2.1.2",
-      "@radix-ui/react-label": "^2.1.0",
-      "@radix-ui/react-popover": "^1.1.2",
-      "@radix-ui/react-progress": "^1.1.0",
-      "@radix-ui/react-radio-group": "^1.2.1",
-      "@radix-ui/react-select": "^2.1.2",
-      "@radix-ui/react-separator": "^1.1.0",
-      "@radix-ui/react-slider": "^1.2.1",
-      "@radix-ui/react-slot": "^1.1.0",
-      "@radix-ui/react-switch": "^1.1.1",
-      "@radix-ui/react-tabs": "^1.1.1",
-      "@radix-ui/react-toast": "^1.2.2",
-      "@radix-ui/react-tooltip": "^1.1.3",
-      "next-themes": "^0.3.0",
-      "sonner": "^1.5.0",
-      "react-hook-form": "^7.53.0",
-      "@hookform/resolvers": "^3.9.0",
-      "zod": "^3.23.8",
-      "@tanstack/react-query": "^5.56.2",
-      "date-fns": "^3.6.0",
-      "recharts": "^2.12.7",
-    }
-  };
+  try {
+    // B2 থেকে zip download করো
+    const res = await r2.send(new GetObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: "node_modules.zip",
+    }));
 
-  writeFileSync(join(BASE_MODULES_DIR, "package.json"), JSON.stringify(basePkg, null, 2));
+    const zipPath = join(BASE_MODULES_DIR, "node_modules.zip");
+    const writeStream = createWriteStream(zipPath);
+    await pipeline(res.Body, writeStream);
+    console.log("[Setup] Download complete. Extracting...");
 
-  const result = spawnSync("npm", ["install", "--prefer-offline"], {
-    cwd: BASE_MODULES_DIR,
-    stdio: "inherit",
-    timeout: 300000,
-  });
+    // Extract করো
+    await new Promise((resolve, reject) => {
+      const extract = Extract({ path: BASE_MODULES_DIR });
+      extract.on("close", resolve);
+      extract.on("error", reject);
+      const fs = await import("fs");
+      fs.createReadStream(zipPath).pipe(extract);
+    });
 
-  if (result.status !== 0) {
-    console.error("[Setup] Base install failed!");
-  } else {
-    console.log("[Setup] ✅ Base node_modules ready.");
+    // zip file delete করো — space বাঁচাও
+    rmSync(zipPath);
+
+    console.log("[Setup] ✅ Base node_modules ready!");
+    baseModulesReady = true;
+  } catch (e) {
+    console.error("[Setup] Failed:", e.message);
   }
 }
 
+// Server start এ setup করো
 setupBaseModules();
 
 // ─── Queue ────────────────────────────────────────────────────────────────────
@@ -143,6 +117,15 @@ const MIME = {
 
 // ─── Build ────────────────────────────────────────────────────────────────────
 async function buildProject(projectId, files) {
+  // Base modules ready না হলে wait করো
+  let waited = 0;
+  while (!baseModulesReady && waited < 120000) {
+    await new Promise(r => setTimeout(r, 2000));
+    waited += 2000;
+  }
+
+  if (!baseModulesReady) throw new Error("Base modules not ready");
+
   const tmpDir = `/tmp/build-${randomUUID()}`;
 
   try {
@@ -154,15 +137,35 @@ async function buildProject(projectId, files) {
       writeFileSync(filePath, file.content, "utf8");
     }
 
-    // 2. Pre-installed node_modules copy করো — npm install না করে
-    console.log(`[Build] Copying base node_modules for ${projectId}...`);
+    // 2. Base node_modules copy করো
+    console.log(`[Build] Copying node_modules for ${projectId}...`);
     cpSync(
       join(BASE_MODULES_DIR, "node_modules"),
       join(tmpDir, "node_modules"),
       { recursive: true }
     );
 
-    // 3. Vite build
+    // 3. Extra packages install করো যেগুলো base এ নেই
+    const pkgJsonPath = join(tmpDir, "package.json");
+    if (existsSync(pkgJsonPath)) {
+      const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
+      const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
+      const extraPkgs = Object.keys(allDeps).filter(
+        pkg => !existsSync(join(tmpDir, "node_modules", pkg))
+      );
+
+      if (extraPkgs.length > 0) {
+        console.log(`[Build] Installing extra: ${extraPkgs.join(", ")}`);
+        const installArgs = extraPkgs.map(p => `${p}@${allDeps[p]}`).join(" ");
+        execSync(`npm install ${installArgs} --prefer-offline`, {
+          cwd: tmpDir,
+          stdio: "pipe",
+          timeout: 60000,
+        });
+      }
+    }
+
+    // 4. Vite build
     console.log(`[Build] Building ${projectId}...`);
     execSync("./node_modules/.bin/vite build", {
       cwd: tmpDir,
@@ -171,7 +174,7 @@ async function buildProject(projectId, files) {
       env: { ...process.env, NODE_ENV: "production" },
     });
 
-    // 4. Upload dist/ to B2
+    // 5. Upload dist/ to B2
     const distDir = join(tmpDir, "dist");
     const prefix = `previews/${projectId}`;
     await uploadDir(distDir, distDir, prefix);
@@ -211,7 +214,7 @@ async function uploadDir(baseDir, currentDir, prefix) {
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
-  res.json({ ok: true, queue: queue.length, building: isBuilding });
+  res.json({ ok: true, queue: queue.length, building: isBuilding, baseModulesReady });
 });
 
 app.post("/build", async (req, res) => {
