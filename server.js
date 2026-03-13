@@ -1,13 +1,10 @@
 import express from "express";
 import cors from "cors";
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
 import { execSync } from "child_process";
-import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, statSync, existsSync, createWriteStream, createReadStream } from "fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, statSync, existsSync } from "fs";
 import { join, extname } from "path";
 import { randomUUID } from "crypto";
-import { pipeline } from "stream/promises";
-import { createUnzip } from "zlib";
-import { Extract } from "unzipper";
 
 const app = express();
 app.use(cors({
@@ -31,52 +28,9 @@ const r2 = new S3Client({
 const R2_BUCKET = process.env.R2_BUCKET_NAME;
 const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL;
 
-// ─── Base node_modules setup ──────────────────────────────────────────────────
-const BASE_MODULES_DIR = "/tmp/base-node-modules";
-let baseModulesReady = false;
-
-async function setupBaseModules() {
-  if (existsSync(join(BASE_MODULES_DIR, "node_modules"))) {
-    console.log("[Setup] Base node_modules already ready.");
-    baseModulesReady = true;
-    return;
-  }
-
-  console.log("[Setup] Downloading node_modules.zip from B2...");
-  mkdirSync(BASE_MODULES_DIR, { recursive: true });
-
-  try {
-    // B2 থেকে zip download করো
-    const res = await r2.send(new GetObjectCommand({
-      Bucket: R2_BUCKET,
-      Key: "node_modules.zip",
-    }));
-
-    const zipPath = join(BASE_MODULES_DIR, "node_modules.zip");
-    const writeStream = createWriteStream(zipPath);
-    await pipeline(res.Body, writeStream);
-    console.log("[Setup] Download complete. Extracting...");
-
-    // Extract করো
-    await new Promise((resolve, reject) => {
-      const extract = Extract({ path: BASE_MODULES_DIR });
-      extract.on("close", resolve);
-      extract.on("error", reject);
-      createReadStream(zipPath).pipe(extract);
-    });
-
-    // zip file delete করো — space বাঁচাও
-    rmSync(zipPath);
-
-    console.log("[Setup] ✅ Base node_modules ready!");
-    baseModulesReady = true;
-  } catch (e) {
-    console.error("[Setup] Failed:", e.message);
-  }
-}
-
-// Server start এ setup করো
-setupBaseModules();
+// ─── Base node_modules — Render build command এ install হয়ে থাকে ─────────────
+const BASE_MODULES_DIR = "/opt/render/project/base";
+console.log(`[Setup] node_modules exists: ${existsSync(join(BASE_MODULES_DIR, "node_modules"))}`);
 
 // ─── Queue ────────────────────────────────────────────────────────────────────
 const queue = [];
@@ -119,21 +73,22 @@ const MIME = {
   ".ttf": "font/ttf",
 };
 
+const SKIP_PACKAGES = [
+  "eslint", "@eslint/js", "vitest", "jsdom", "@testing-library/react",
+  "@testing-library/jest-dom", "eslint-plugin-react-hooks",
+  "eslint-plugin-react-refresh", "globals", "typescript-eslint",
+];
+
 // ─── Build ────────────────────────────────────────────────────────────────────
 async function buildProject(projectId, files) {
-  // Base modules ready না হলে wait করো
-  let waited = 0;
-  while (!baseModulesReady && waited < 120000) {
-    await new Promise(r => setTimeout(r, 2000));
-    waited += 2000;
+  if (!existsSync(join(BASE_MODULES_DIR, "node_modules"))) {
+    throw new Error("Base node_modules not found. Check Render build command.");
   }
-
-  if (!baseModulesReady) throw new Error("Base modules not ready");
 
   const tmpDir = `/tmp/build-${randomUUID()}`;
 
   try {
-    // 1. Write project files
+    // 1. Project files write
     for (const file of files) {
       const filePath = join(tmpDir, file.path);
       const dir = filePath.substring(0, filePath.lastIndexOf("/"));
@@ -141,39 +96,31 @@ async function buildProject(projectId, files) {
       writeFileSync(filePath, file.content, "utf8");
     }
 
-    // 2. Base node_modules symlink করো — copy না, pointer মাত্র → fast!
-    console.log(`[Build] Symlinking node_modules for ${projectId}...`);
+    // 2. Symlink node_modules — fast!
+    console.log(`[Build] Symlinking for ${projectId}...`);
     execSync(`ln -s ${join(BASE_MODULES_DIR, "node_modules")} ${join(tmpDir, "node_modules")}`);
 
-    // 3. Extra packages install করো — শুধু dependencies, devDependencies skip
-    // (eslint, vitest, testing-library — এগুলো preview build এ লাগে না)
-    const SKIP_PACKAGES = [
-      "eslint", "@eslint/js", "vitest", "jsdom", "@testing-library/react",
-      "@testing-library/jest-dom", "eslint-plugin-react-hooks",
-      "eslint-plugin-react-refresh", "globals", "typescript-eslint",
-    ];
-
+    // 3. Extra packages install
     const pkgJsonPath = join(tmpDir, "package.json");
     if (existsSync(pkgJsonPath)) {
       const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-      // শুধু dependencies — devDependencies না
       const deps = pkgJson.dependencies || {};
       const extraPkgs = Object.keys(deps).filter(
-        pkg => !SKIP_PACKAGES.includes(pkg) && !existsSync(join(tmpDir, "node_modules", pkg))
+        pkg => !SKIP_PACKAGES.includes(pkg) &&
+               !existsSync(join(BASE_MODULES_DIR, "node_modules", pkg))
       );
-
       if (extraPkgs.length > 0) {
         console.log(`[Build] Installing extra: ${extraPkgs.join(", ")}`);
         const installArgs = extraPkgs.map(p => `${p}@${deps[p]}`).join(" ");
-        execSync(`npm install ${installArgs} --prefer-offline --no-audit --no-fund`, {
-          cwd: tmpDir,
+        execSync(`npm install ${installArgs} --no-audit --no-fund`, {
+          cwd: BASE_MODULES_DIR,
           stdio: "pipe",
           timeout: 180000,
         });
       }
     }
 
-    // 4. Vite build — vite এর actual JS entry point directly run করো
+    // 4. Vite build
     console.log(`[Build] Building ${projectId}...`);
     const viteJs = join(BASE_MODULES_DIR, "node_modules", "vite", "bin", "vite.js");
     execSync(`node ${viteJs} build`, {
@@ -183,10 +130,9 @@ async function buildProject(projectId, files) {
       env: { ...process.env, NODE_ENV: "production" },
     });
 
-    // 5. Upload dist/ to B2
+    // 5. Upload to B2
     const distDir = join(tmpDir, "dist");
-    const prefix = `previews/${projectId}`;
-    await uploadDir(distDir, distDir, prefix);
+    await uploadDir(distDir, distDir, `previews/${projectId}`);
 
     const previewUrl = `${R2_PUBLIC_URL}/previews/${projectId}/index.html`;
     console.log(`[Build] ✅ Done: ${previewUrl}`);
@@ -223,20 +169,22 @@ async function uploadDir(baseDir, currentDir, prefix) {
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 app.get("/health", (req, res) => {
-  res.json({ ok: true, queue: queue.length, building: isBuilding, baseModulesReady });
+  res.json({
+    ok: true,
+    queue: queue.length,
+    building: isBuilding,
+    baseModulesReady: existsSync(join(BASE_MODULES_DIR, "node_modules")),
+  });
 });
 
 app.post("/build", async (req, res) => {
   const { projectId, files, secret } = req.body;
-
   if (secret !== process.env.BUILD_SECRET) {
     return res.status(401).json({ error: "Unauthorized" });
   }
-
   if (!projectId || !files?.length) {
     return res.status(400).json({ error: "projectId and files required" });
   }
-
   try {
     const url = await enqueue(projectId, files);
     res.json({ success: true, url });
