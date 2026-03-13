@@ -168,10 +168,10 @@ async function buildProject(projectId, files) {
       }
     }
 
-    // 4. Vite build — symlink permission issue এড়াতে absolute path use করো
+    // 4. Vite build — vite এর actual JS entry point directly run করো
     console.log(`[Build] Building ${projectId}...`);
-    const viteBin = join(BASE_MODULES_DIR, "node_modules", ".bin", "vite");
-    execSync(`node ${viteBin} build`, {
+    const viteJs = join(BASE_MODULES_DIR, "node_modules", "vite", "bin", "vite.js");
+    execSync(`node ${viteJs} build`, {
       cwd: tmpDir,
       stdio: "pipe",
       timeout: 120000,
