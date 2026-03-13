@@ -120,18 +120,6 @@ async function buildProject(projectId, files) {
       }
     }
 
-    // 4. Vite config — base path set করো যাতে assets সঠিক path এ load হয়
-    const viteConfigPath = join(tmpDir, "vite.config.ts");
-    const viteConfigContent = `import { defineConfig } from "vite";
-import react from "@vitejs/plugin-react-swc";
-import path from "path";
-export default defineConfig({
-  plugins: [react()],
-  base: "/previews/${projectId}/",
-  resolve: { alias: { "@": path.resolve(__dirname, "./src") } },
-});`;
-    writeFileSync(viteConfigPath, viteConfigContent, "utf8");
-
     // 4. Vite build
     console.log(`[Build] Building ${projectId}...`);
     const viteJs = join(BASE_MODULES_DIR, "node_modules", "vite", "bin", "vite.js");
