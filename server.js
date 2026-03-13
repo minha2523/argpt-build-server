@@ -10,7 +10,12 @@ import { createUnzip } from "zlib";
 import { Extract } from "unzipper";
 
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+}));
+app.options("*", cors());
 app.use(express.json({ limit: "50mb" }));
 
 // ─── B2 Client ────────────────────────────────────────────────────────────────
@@ -160,10 +165,10 @@ async function buildProject(projectId, files) {
       if (extraPkgs.length > 0) {
         console.log(`[Build] Installing extra: ${extraPkgs.join(", ")}`);
         const installArgs = extraPkgs.map(p => `${p}@${deps[p]}`).join(" ");
-        execSync(`npm install ${installArgs} --prefer-offline`, {
+        execSync(`npm install ${installArgs} --prefer-offline --no-audit --no-fund`, {
           cwd: tmpDir,
           stdio: "pipe",
-          timeout: 60000,
+          timeout: 180000,
         });
       }
     }
