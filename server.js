@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
 import { execSync } from "child_process";
-import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, statSync, cpSync, existsSync, createWriteStream, createReadStream } from "fs";
+import { mkdirSync, writeFileSync, rmSync, readFileSync, readdirSync, statSync, existsSync, createWriteStream, createReadStream } from "fs";
 import { join, extname } from "path";
 import { randomUUID } from "crypto";
 import { pipeline } from "stream/promises";
@@ -136,13 +136,9 @@ async function buildProject(projectId, files) {
       writeFileSync(filePath, file.content, "utf8");
     }
 
-    // 2. Base node_modules copy করো
-    console.log(`[Build] Copying node_modules for ${projectId}...`);
-    cpSync(
-      join(BASE_MODULES_DIR, "node_modules"),
-      join(tmpDir, "node_modules"),
-      { recursive: true }
-    );
+    // 2. Base node_modules symlink করো — copy না, pointer মাত্র → fast!
+    console.log(`[Build] Symlinking node_modules for ${projectId}...`);
+    execSync(`ln -s ${join(BASE_MODULES_DIR, "node_modules")} ${join(tmpDir, "node_modules")}`);
 
     // 3. Extra packages install করো যেগুলো base এ নেই
     const pkgJsonPath = join(tmpDir, "package.json");
