@@ -140,18 +140,26 @@ async function buildProject(projectId, files) {
     console.log(`[Build] Symlinking node_modules for ${projectId}...`);
     execSync(`ln -s ${join(BASE_MODULES_DIR, "node_modules")} ${join(tmpDir, "node_modules")}`);
 
-    // 3. Extra packages install করো যেগুলো base এ নেই
+    // 3. Extra packages install করো — শুধু dependencies, devDependencies skip
+    // (eslint, vitest, testing-library — এগুলো preview build এ লাগে না)
+    const SKIP_PACKAGES = [
+      "eslint", "@eslint/js", "vitest", "jsdom", "@testing-library/react",
+      "@testing-library/jest-dom", "eslint-plugin-react-hooks",
+      "eslint-plugin-react-refresh", "globals", "typescript-eslint",
+    ];
+
     const pkgJsonPath = join(tmpDir, "package.json");
     if (existsSync(pkgJsonPath)) {
       const pkgJson = JSON.parse(readFileSync(pkgJsonPath, "utf8"));
-      const allDeps = { ...pkgJson.dependencies, ...pkgJson.devDependencies };
-      const extraPkgs = Object.keys(allDeps).filter(
-        pkg => !existsSync(join(tmpDir, "node_modules", pkg))
+      // শুধু dependencies — devDependencies না
+      const deps = pkgJson.dependencies || {};
+      const extraPkgs = Object.keys(deps).filter(
+        pkg => !SKIP_PACKAGES.includes(pkg) && !existsSync(join(tmpDir, "node_modules", pkg))
       );
 
       if (extraPkgs.length > 0) {
         console.log(`[Build] Installing extra: ${extraPkgs.join(", ")}`);
-        const installArgs = extraPkgs.map(p => `${p}@${allDeps[p]}`).join(" ");
+        const installArgs = extraPkgs.map(p => `${p}@${deps[p]}`).join(" ");
         execSync(`npm install ${installArgs} --prefer-offline`, {
           cwd: tmpDir,
           stdio: "pipe",
