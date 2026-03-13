@@ -123,7 +123,7 @@ async function buildProject(projectId, files) {
     // 4. Vite build
     console.log(`[Build] Building ${projectId}...`);
     const viteJs = join(BASE_MODULES_DIR, "node_modules", "vite", "bin", "vite.js");
-    execSync(`node ${viteJs} build`, {
+    execSync(`node --max-old-space-size=400 ${viteJs} build`, {
       cwd: tmpDir,
       stdio: "pipe",
       timeout: 120000,
